@@ -35,12 +35,13 @@ class AnimalApiTests(TestCase):
 
     def test_public_can_list_animals(self):
         response = self.client.get("/api/animals/")
+        animals = response.json()
+        maia = next(animal for animal in animals if animal["name"] == "Maia")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()[0]["name"], "Maia")
-        self.assertEqual(response.json()[0]["species"], "cat")
-        self.assertEqual(response.json()[0]["gender"], "female")
-        self.assertIn("image_url", response.json()[0])
+        self.assertEqual(maia["species"], "cat")
+        self.assertEqual(maia["gender"], "female")
+        self.assertIn("image_url", maia)
 
     def test_public_can_retrieve_animal(self):
         response = self.client.get(f"/api/animals/{self.animal.id}/")
