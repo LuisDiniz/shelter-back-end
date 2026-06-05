@@ -13,7 +13,7 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 from pathlib import Path
 import os
 import logging
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
 
@@ -106,20 +106,35 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'canil_gatil.wsgi.app'
 
+
+def database_config_from_url(database_url):
+    parsed_url = urlparse(database_url)
+    query_options = {
+        key: values[-1]
+        for key, values in parse_qs(parsed_url.query).items()
+        if values
+    }
+
+    config = {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': unquote(parsed_url.path.lstrip('/')),
+        'USER': unquote(parsed_url.username or ''),
+        'PASSWORD': unquote(parsed_url.password or ''),
+        'HOST': parsed_url.hostname or '',
+        'PORT': parsed_url.port or 5432,
+    }
+
+    if query_options:
+        config['OPTIONS'] = query_options
+
+    return config
+
+
 database_url = os.getenv("DATABASE_URL")
 
 if database_url:
-    tmpPostgres = urlparse(database_url)
-
     DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': tmpPostgres.path.replace('/', ''),
-            'USER': tmpPostgres.username,
-            'PASSWORD': tmpPostgres.password,
-            'HOST': tmpPostgres.hostname,
-            'PORT': 5432,
-        }
+        'default': database_config_from_url(database_url)
     }
 else:
     DATABASES = {
