@@ -14,8 +14,8 @@ Antes de iniciar, certifique-se de ter instalado:
 
 ### 1️⃣ Clonar o Repositório
 ```sh
- git clone https://github.com/Jrgf27/CanilSeixal.git
- cd CanilSeixal
+ git clone https://github.com/LuisDiniz/shelter-back-end
+ cd shelter-back-end
 ```
 
 ### 2️⃣ Criar e Ativar um Ambiente Virtual (Caso esteja a ser usado)

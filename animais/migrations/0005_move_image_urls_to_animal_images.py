@@ -33,6 +33,8 @@ def restore_animal_image_urls(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    atomic = False
+
     dependencies = [
         ("animais", "0004_seed_mock_animals"),
     ]
@@ -51,6 +53,7 @@ class Migration(migrations.Migration):
         migrations.RunPython(
             move_image_urls_to_animal_images,
             restore_animal_image_urls,
+            atomic=True,
         ),
         migrations.RemoveField(
             model_name="animalimages",
