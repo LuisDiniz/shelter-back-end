@@ -2,6 +2,7 @@ import json
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.test.client import BOUNDARY, MULTIPART_CONTENT, encode_multipart
@@ -11,6 +12,7 @@ from .models import Animal, AnimalImages
 
 class AnimalApiTests(TestCase):
     def setUp(self):
+        cache.clear()
         user_model = get_user_model()
         self.admin_user = user_model.objects.create_user(
             email="admin@example.com",
@@ -50,6 +52,16 @@ class AnimalApiTests(TestCase):
         self.assertIn("image_url", maia)
         self.assertIn(self.animal_image.image_url, maia["image_urls"])
 
+    def test_animal_list_api_uses_cache_after_first_request(self):
+        first_response = self.client.get("/api/animals/")
+
+        with self.assertNumQueries(0):
+            cached_response = self.client.get("/api/animals/")
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(cached_response.status_code, 200)
+        self.assertEqual(cached_response.json(), first_response.json())
+
     def test_public_can_retrieve_animal(self):
         response = self.client.get(f"/api/animals/{self.animal.id}/")
 
@@ -57,6 +69,67 @@ class AnimalApiTests(TestCase):
         self.assertEqual(response.json()["id"], self.animal.id)
         self.assertEqual(response.json()["image_url"], self.animal_image.image_url)
         self.assertEqual(response.json()["images"][0]["image_url"], self.animal_image.image_url)
+
+    def test_animal_detail_api_uses_cache_after_first_request(self):
+        first_response = self.client.get(f"/api/animals/{self.animal.id}/")
+
+        with self.assertNumQueries(0):
+            cached_response = self.client.get(f"/api/animals/{self.animal.id}/")
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(cached_response.status_code, 200)
+        self.assertEqual(cached_response.json(), first_response.json())
+
+    def test_animal_create_invalidates_list_cache(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        self.client.get("/api/animals/")
+
+        create_response = self.client.post(
+            "/api/animals/",
+            data=json.dumps(self._animal_payload()),
+            content_type="application/json",
+            headers={"Authorization": f"Token {token}"},
+        )
+        list_response = self.client.get("/api/animals/")
+        animal_names = [animal["name"] for animal in list_response.json()]
+
+        self.assertEqual(create_response.status_code, 201)
+        self.assertIn("Max", animal_names)
+
+    def test_animal_update_and_delete_invalidate_cached_api_responses(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        self.client.get("/api/animals/")
+        self.client.get(f"/api/animals/{self.animal.id}/")
+
+        update_response = self.client.patch(
+            f"/api/animals/{self.animal.id}/",
+            data=json.dumps({"name": "Maia Updated"}),
+            content_type="application/json",
+            headers={"Authorization": f"Token {token}"},
+        )
+        list_response = self.client.get("/api/animals/")
+        detail_response = self.client.get(f"/api/animals/{self.animal.id}/")
+
+        self.assertEqual(update_response.status_code, 200)
+        self.assertIn(
+            "Maia Updated",
+            [animal["name"] for animal in list_response.json()],
+        )
+        self.assertEqual(detail_response.json()["name"], "Maia Updated")
+
+        delete_response = self.client.delete(
+            f"/api/animals/{self.animal.id}/",
+            headers={"Authorization": f"Token {token}"},
+        )
+        list_after_delete_response = self.client.get("/api/animals/")
+        detail_after_delete_response = self.client.get(f"/api/animals/{self.animal.id}/")
+
+        self.assertEqual(delete_response.status_code, 204)
+        self.assertNotIn(
+            self.animal.id,
+            [animal["id"] for animal in list_after_delete_response.json()],
+        )
+        self.assertEqual(detail_after_delete_response.status_code, 404)
 
     def test_anonymous_user_cannot_create_animal(self):
         response = self.client.post(

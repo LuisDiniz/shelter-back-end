@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from django.conf import settings
+from django.core.cache import cache
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import HttpResponse, JsonResponse
@@ -20,6 +21,8 @@ logger = logging.getLogger("general_logger")
 
 SENSITIVE_LOG_FIELD_PARTS = ("authorization", "password", "secret", "token", "api_key")
 MAX_LOG_VALUE_LENGTH = 200
+ANIMAL_API_LIST_CACHE_KEY = "animal_api:animals:list:v1"
+ANIMAL_API_DETAIL_CACHE_KEY_PREFIX = "animal_api:animals:detail:v1"
 
 SUPPORTED_IMAGE_CONTENT_TYPES = {
     "image/jpeg",
@@ -30,6 +33,17 @@ SUPPORTED_IMAGE_CONTENT_TYPES = {
 }
 GENERIC_IMAGE_CONTENT_TYPES = {"", "application/octet-stream"}
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+
+
+def get_animal_detail_cache_key(animal_id):
+    return f"{ANIMAL_API_DETAIL_CACHE_KEY_PREFIX}:{animal_id}"
+
+
+def invalidate_animal_api_cache(animal_id=None):
+    cache.delete(ANIMAL_API_LIST_CACHE_KEY)
+
+    if animal_id is not None:
+        cache.delete(get_animal_detail_cache_key(animal_id))
 
 
 class CloudinaryUploadError(Exception):
@@ -420,8 +434,18 @@ def animal_list_api(request):
         return HttpResponse(status=204)
 
     if request.method == "GET":
-        animals = Animal.objects.all().order_by("id")
-        return JsonResponse([serialize_animal(animal, request) for animal in animals], safe=False)
+        cached_animals = cache.get(ANIMAL_API_LIST_CACHE_KEY)
+        if cached_animals is not None:
+            return JsonResponse(cached_animals, safe=False)
+
+        animals = Animal.objects.prefetch_related("fotos").all().order_by("id")
+        serialized_animals = [serialize_animal(animal, request) for animal in animals]
+        cache.set(
+            ANIMAL_API_LIST_CACHE_KEY,
+            serialized_animals,
+            timeout=None,
+        )
+        return JsonResponse(serialized_animals, safe=False)
 
     if not require_admin_user(request):
         return animal_api_error_response(
@@ -453,6 +477,7 @@ def animal_list_api(request):
             extra=error.log_context,
         )
 
+    invalidate_animal_api_cache(animal.id)
     return JsonResponse(serialize_animal(animal, request), status=201)
 
 
@@ -462,10 +487,25 @@ def animal_detail_api(request, animal_id):
     if request.method == "OPTIONS":
         return HttpResponse(status=204)
 
-    animal = get_object_or_404(Animal, id=animal_id)
-
     if request.method == "GET":
-        return JsonResponse(serialize_animal(animal, request))
+        cache_key = get_animal_detail_cache_key(animal_id)
+        cached_animal = cache.get(cache_key)
+        if cached_animal is not None:
+            return JsonResponse(cached_animal)
+
+        animal = get_object_or_404(
+            Animal.objects.prefetch_related("fotos"),
+            id=animal_id,
+        )
+        serialized_animal = serialize_animal(animal, request)
+        cache.set(
+            cache_key,
+            serialized_animal,
+            timeout=None,
+        )
+        return JsonResponse(serialized_animal)
+
+    animal = get_object_or_404(Animal, id=animal_id)
 
     if not require_admin_user(request):
         return animal_api_error_response(
@@ -477,6 +517,7 @@ def animal_detail_api(request, animal_id):
 
     if request.method == "DELETE":
         animal.delete()
+        invalidate_animal_api_cache(animal_id)
         return HttpResponse(status=204)
 
     payload, image_file, error = read_animal_request_payload(request)
@@ -507,6 +548,7 @@ def animal_detail_api(request, animal_id):
             extra={"animal_id": animal_id, **error.log_context},
         )
 
+    invalidate_animal_api_cache(animal.id)
     return JsonResponse(serialize_animal(animal, request))
 
 
