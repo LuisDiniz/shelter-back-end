@@ -52,6 +52,14 @@ class AnimalApiTests(TestCase):
         self.assertIn("image_url", maia)
         self.assertIn(self.animal_image.image_url, maia["image_urls"])
 
+    def test_public_can_list_animals_without_trailing_slash(self):
+        response = self.client.get("/api/animals")
+        animals = response.json()
+        maia = next(animal for animal in animals if animal["name"] == "Maia")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(maia["id"], self.animal.id)
+
     def test_animal_list_api_uses_cache_after_first_request(self):
         first_response = self.client.get("/api/animals/")
 
