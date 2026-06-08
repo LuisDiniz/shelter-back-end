@@ -159,3 +159,4 @@ cython_debug/
 !.elasticbeanstalk/*.global.yml
 example_with_header.pdf
 .vercel
+/.idea

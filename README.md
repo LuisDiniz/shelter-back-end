@@ -38,6 +38,8 @@ pip install -r requirements.txt
 ```
 
 ### 4️⃣ Configurar a Base de Dados
+Por defeito, o projeto usa SQLite em desenvolvimento. Para usar PostgreSQL/Aiven, crie um ficheiro `.env` local a partir de `.env.example` e defina `DATABASE_URL` com a connection string da base de dados.
+
 ```sh
 python manage.py makemigrations
 python manage.py migrate
@@ -55,4 +57,3 @@ python manage.py runserver
 ```
 
 O projeto vai estar disponível em: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
-

@@ -13,7 +13,7 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 from pathlib import Path
 import os
 import logging
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
 
@@ -49,6 +49,15 @@ ALLOWED_HOSTS = [
 '*'
 ]
 
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -70,6 +79,7 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'canil_gatil.middleware.CorsMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -96,18 +106,43 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'canil_gatil.wsgi.app'
 
-tmpPostgres = urlparse(os.getenv("DATABASE_URL"))
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': tmpPostgres.path.replace('/', ''),
-        'USER': tmpPostgres.username,
-        'PASSWORD': tmpPostgres.password,
-        'HOST': tmpPostgres.hostname,
-        'PORT': 5432,
+def database_config_from_url(database_url):
+    parsed_url = urlparse(database_url)
+    query_options = {
+        key: values[-1]
+        for key, values in parse_qs(parsed_url.query).items()
+        if values
     }
-}
+
+    config = {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': unquote(parsed_url.path.lstrip('/')),
+        'USER': unquote(parsed_url.username or ''),
+        'PASSWORD': unquote(parsed_url.password or ''),
+        'HOST': parsed_url.hostname or '',
+        'PORT': parsed_url.port or 5432,
+    }
+
+    if query_options:
+        config['OPTIONS'] = query_options
+
+    return config
+
+
+database_url = os.getenv("DATABASE_URL")
+
+if database_url:
+    DATABASES = {
+        'default': database_config_from_url(database_url)
+    }
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 AUTH_PASSWORD_VALIDATORS = [

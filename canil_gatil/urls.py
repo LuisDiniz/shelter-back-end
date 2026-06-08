@@ -27,6 +27,7 @@ from userhandling.forms import CustomAuthenticationForm
 urlpatterns = [
     path('admin/', admin.site.urls),
 
+    path('api/auth/', include('userhandling.api.urls')),
     path('', include('animais.urls')),
     path('adoptantes', include('adoptantes.urls')),
     
