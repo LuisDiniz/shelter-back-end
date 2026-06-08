@@ -1,7 +1,10 @@
 import json
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
+from django.test.client import BOUNDARY, MULTIPART_CONTENT, encode_multipart
 
 from .models import Animal, AnimalImages
 
@@ -117,6 +120,180 @@ class AnimalApiTests(TestCase):
             headers={"Authorization": f"Token {token}"},
         )
         self.assertEqual(delete_response.status_code, 204)
+
+    def test_admin_can_create_animal_with_uploaded_image(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        payload = self._animal_payload()
+        payload.pop("image_url")
+        image = SimpleUploadedFile(
+            "max.jpg",
+            b"image-bytes",
+            content_type="image/jpeg",
+        )
+        cloudinary_url = "https://res.cloudinary.com/demo/image/upload/uploaded-max.jpg"
+
+        with patch(
+            "animais.views.upload_animal_image_to_cloudinary",
+            return_value=cloudinary_url,
+        ) as upload_mock:
+            response = self.client.post(
+                "/api/animals/",
+                data={**payload, "image_file": image},
+                headers={"Authorization": f"Token {token}"},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        upload_mock.assert_called_once()
+        self.assertEqual(response.json()["image_url"], cloudinary_url)
+        self.assertTrue(
+            AnimalImages.objects.filter(
+                animal_id=response.json()["id"],
+                image_url=cloudinary_url,
+            ).exists()
+        )
+
+    def test_uploaded_image_takes_precedence_over_image_url(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        image = SimpleUploadedFile(
+            "max.png",
+            b"image-bytes",
+            content_type="image/png",
+        )
+        cloudinary_url = "https://res.cloudinary.com/demo/image/upload/uploaded-max.png"
+
+        with patch(
+            "animais.views.upload_animal_image_to_cloudinary",
+            return_value=cloudinary_url,
+        ):
+            response = self.client.post(
+                "/api/animals/",
+                data={**self._animal_payload(), "image_file": image},
+                headers={"Authorization": f"Token {token}"},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["image_url"], cloudinary_url)
+        self.assertEqual(response.json()["image_urls"], [cloudinary_url])
+        self.assertFalse(
+            AnimalImages.objects.filter(
+                animal_id=response.json()["id"],
+                image_url=self._animal_payload()["image_url"],
+            ).exists()
+        )
+
+    def test_admin_can_update_animal_with_uploaded_image(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        image = SimpleUploadedFile(
+            "maia.webp",
+            b"image-bytes",
+            content_type="image/webp",
+        )
+        cloudinary_url = "https://res.cloudinary.com/demo/image/upload/maia-new.webp"
+
+        with patch(
+            "animais.views.upload_animal_image_to_cloudinary",
+            return_value=cloudinary_url,
+        ) as upload_mock:
+            response = self.client.generic(
+                "PATCH",
+                f"/api/animals/{self.animal.id}/",
+                data=encode_multipart(BOUNDARY, {"image_file": image}),
+                content_type=MULTIPART_CONTENT,
+                headers={"Authorization": f"Token {token}"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        upload_mock.assert_called_once()
+        self.assertIn(cloudinary_url, response.json()["image_urls"])
+        self.assertTrue(
+            AnimalImages.objects.filter(
+                animal=self.animal,
+                image_url=cloudinary_url,
+            ).exists()
+        )
+
+    def test_non_admin_cannot_upload_image(self):
+        token = self._get_token("user@example.com", "user-pass")
+        image = SimpleUploadedFile(
+            "max.jpg",
+            b"image-bytes",
+            content_type="image/jpeg",
+        )
+
+        response = self.client.post(
+            "/api/animals/",
+            data={**self._animal_payload(), "image_file": image},
+            headers={"Authorization": f"Token {token}"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_invalid_uploaded_image_type_returns_bad_request(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        image = SimpleUploadedFile("notes.txt", b"hello", content_type="text/plain")
+
+        response = self.client.post(
+            "/api/animals/",
+            data={**self._animal_payload(), "image_file": image},
+            headers={"Authorization": f"Token {token}"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported image type", response.json()["detail"])
+
+    def test_invalid_uploaded_image_type_logs_rejection_context(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        image = SimpleUploadedFile("notes.txt", b"hello", content_type="text/plain")
+
+        with self.assertLogs("general_logger", level="WARNING") as logs:
+            response = self.client.post(
+                "/api/animals/",
+                data={**self._animal_payload(), "image_file": image},
+                headers={"Authorization": f"Token {token}"},
+            )
+
+        log_output = "\n".join(logs.output)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported image type", log_output)
+        self.assertIn("image_content_type", log_output)
+        self.assertIn("notes.txt", log_output)
+        self.assertIn("text/plain", log_output)
+
+    @override_settings(
+        CLOUDINARY_CLOUD_NAME="",
+        CLOUDINARY_API_KEY="",
+        CLOUDINARY_API_SECRET="",
+    )
+    def test_missing_cloudinary_config_logs_bad_request_context(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        image = SimpleUploadedFile(
+            "max.jpg",
+            b"image-bytes",
+            content_type="image/jpeg",
+        )
+
+        with self.assertLogs("general_logger", level="WARNING") as logs:
+            response = self.client.post(
+                "/api/animals/",
+                data={**self._animal_payload(), "image_file": image},
+                headers={"Authorization": f"Token {token}"},
+            )
+
+        log_output = "\n".join(logs.output)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "Cloudinary is not configured.")
+        self.assertIn("Cloudinary is not configured", log_output)
+        self.assertIn("CLOUDINARY_CLOUD_NAME", log_output)
+        self.assertIn("max.jpg", log_output)
+
+    def test_heic_uploaded_image_is_allowed(self):
+        image = SimpleUploadedFile("photo.HEIC", b"image-bytes", content_type="image/heic")
+
+        from .views import validate_animal_image_file
+
+        validate_animal_image_file(image)
 
     def _get_token(self, username, password):
         response = self.client.post(
