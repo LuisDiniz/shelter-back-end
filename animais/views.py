@@ -1,21 +1,19 @@
 import json
 import logging
 
-from django.contrib.auth import authenticate, get_user_model
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.core import signing
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
-from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+
+from userhandling.api.authentication import require_admin_user
 
 from .models import Animal, AnimalImages
 from .forms import AnimalForm, AnimalFotosForm
 
 logger = logging.getLogger("general_logger")
-auth_signer = signing.TimestampSigner(salt="canil-gatil-api-token")
 
 
 class AnimalList(LoginRequiredMixin, TemplateView):
@@ -63,10 +61,15 @@ class AnimalDetails(LoginRequiredMixin, TemplateView):
 
 
 def serialize_animal(animal, request=None):
-    image_url = animal.image_url
-
-    if not image_url and animal.fotos.exists() and request:
-        image_url = request.build_absolute_uri(animal.fotos.first().imagem.url)
+    images = [
+        serialized_image
+        for serialized_image in (
+            serialize_animal_image(image, request)
+            for image in animal.fotos.all().order_by("id")
+        )
+        if serialized_image["image_url"]
+    ]
+    image_urls = [image["image_url"] for image in images]
 
     return {
         "id": animal.id,
@@ -76,10 +79,19 @@ def serialize_animal(animal, request=None):
         "age": animal.idade,
         "gender": animal.gender,
         "description": animal.descricao,
-        "image_url": image_url,
+        "image_url": image_urls[0] if image_urls else "",
+        "image_urls": image_urls,
+        "images": images,
         "medical_history": animal.medical_history,
         "vaccinations": animal.vaccinations,
         "admission_date": animal.admission_date or animal.last_update_date,
+    }
+
+
+def serialize_animal_image(image, request=None):
+    return {
+        "id": image.id,
+        "image_url": image.get_url(request),
     }
 
 
@@ -93,37 +105,6 @@ def read_json_body(request):
         return None
 
 
-def get_token_user(request):
-    authorization = request.headers.get("Authorization", "")
-
-    if not authorization.startswith("Token "):
-        return None
-
-    token = authorization.removeprefix("Token ").strip()
-
-    try:
-        user_id = auth_signer.unsign(token)
-    except signing.BadSignature:
-        return None
-
-    user_model = get_user_model()
-
-    try:
-        return user_model.objects.get(pk=user_id, is_active=True)
-    except user_model.DoesNotExist:
-        return None
-
-
-def require_admin_user(request):
-    user = get_token_user(request)
-    return bool(user and user.is_staff)
-
-
-def get_user_display_name(user):
-    name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
-    return name or user.get_username()
-
-
 def apply_animal_payload(animal, payload):
     field_map = {
         "name": "name",
@@ -132,7 +113,6 @@ def apply_animal_payload(animal, payload):
         "age": "idade",
         "gender": "gender",
         "description": "descricao",
-        "image_url": "image_url",
         "medical_history": "medical_history",
         "vaccinations": "vaccinations",
     }
@@ -142,6 +122,41 @@ def apply_animal_payload(animal, payload):
             setattr(animal, model_field, payload[api_field])
 
     return animal
+
+
+def get_image_urls_from_payload(payload):
+    raw_urls = []
+
+    if "image_url" in payload:
+        raw_urls.append(payload.get("image_url"))
+
+    image_urls = payload.get("image_urls")
+    if isinstance(image_urls, list):
+        raw_urls.extend(image_urls)
+    elif image_urls:
+        raw_urls.append(image_urls)
+
+    images = payload.get("images")
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, dict):
+                raw_urls.append(image.get("image_url") or image.get("url"))
+            else:
+                raw_urls.append(image)
+
+    return [
+        image_url.strip()
+        for image_url in raw_urls
+        if isinstance(image_url, str) and image_url.strip()
+    ]
+
+
+def add_image_urls_to_animal(animal, payload):
+    for image_url in get_image_urls_from_payload(payload):
+        AnimalImages.objects.get_or_create(
+            animal=animal,
+            image_url=image_url,
+        )
 
 
 @csrf_exempt
@@ -163,6 +178,7 @@ def animal_list_api(request):
 
     animal = apply_animal_payload(Animal(), payload)
     animal.save()
+    add_image_urls_to_animal(animal, payload)
 
     return JsonResponse(serialize_animal(animal, request), status=201)
 
@@ -191,54 +207,22 @@ def animal_detail_api(request, animal_id):
 
     apply_animal_payload(animal, payload)
     animal.save()
+    add_image_urls_to_animal(animal, payload)
 
     return JsonResponse(serialize_animal(animal, request))
 
 
-@csrf_exempt
-@require_http_methods(["POST", "OPTIONS"])
-def auth_token_api(request):
-    if request.method == "OPTIONS":
-        return HttpResponse(status=204)
-
-    payload = read_json_body(request)
-    if payload is None:
-        return JsonResponse({"detail": "Invalid JSON body."}, status=400)
-
-    user = authenticate(
-        request,
-        username=payload.get("username"),
-        password=payload.get("password"),
-    )
-
-    if not user or not user.is_active:
-        return JsonResponse({"detail": "Invalid credentials."}, status=400)
-
-    token = auth_signer.sign(str(user.pk))
-
-    return JsonResponse({
-        "token": token,
-        "user": {
-            "id": str(user.pk),
-            "username": user.get_username(),
-            "name": get_user_display_name(user),
-            "role": "admin" if user.is_staff else "user",
-            "is_staff": user.is_staff,
-            "is_superuser": user.is_superuser,
-        },
-    })
-
 class AnimalImagens(LoginRequiredMixin, TemplateView):
     def post(self, response, animal_id):
         
-        form = AnimalFotosForm(response.POST, response.FILES)
+        form = AnimalFotosForm(response.POST)
         
         if form.is_valid():
             animal = get_object_or_404(Animal, id= animal_id)
             
             AnimalImages.objects.create(
                 animal = animal,
-                imagem = form.cleaned_data['imagem']
+                image_url = form.cleaned_data['image_url']
             )
             form = AnimalFotosForm()
             

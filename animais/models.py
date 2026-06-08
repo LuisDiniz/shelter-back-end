@@ -27,7 +27,6 @@ class Animal(models.Model):
     raca = models.CharField(max_length=20)
 
     descricao = models.TextField(default="")
-    image_url = models.URLField(max_length=500, blank=True, default="")
     gender = models.CharField(
         max_length=6,
         choices=GENDER_CHOICES,
@@ -35,9 +34,6 @@ class Animal(models.Model):
     )
     medical_history = models.TextField(blank=True, default="")
     vaccinations = models.TextField(blank=True, default="")
-    informacao_extra = models.TextField(default="")
-    comportamento_pessoas = models.TextField(default="")
-    comportamento_animais = models.TextField(default="")
 
     tipo = models.CharField(
         max_length=4,
@@ -56,4 +52,14 @@ class Animal(models.Model):
 
 class AnimalImages(models.Model):
     animal = models.ForeignKey(Animal, on_delete=models.CASCADE, null=True, related_name="fotos")
-    imagem = models.ImageField(upload_to='%Y/%m/%d')
+    image_url = models.URLField(max_length=500, blank=True, default="")
+
+    def get_url(self, request=None):
+        if self.image_url:
+            return self.image_url
+
+        return ""
+
+    @property
+    def url(self):
+        return self.get_url()

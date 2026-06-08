@@ -11,7 +11,7 @@ class AnimalForm(forms.ModelForm):
 class AnimalFotosForm(forms.ModelForm):
     class Meta:
         model = AnimalImages
-        fields = ('imagem',)  
+        fields = ('image_url',)
         
 
 class AdoptanteForm(forms.ModelForm):

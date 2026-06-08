@@ -38,9 +38,7 @@ pip install -r requirements.txt
 ```
 
 ### 4️⃣ Configurar a Base de Dados
-Por defeito, o projeto usa SQLite em desenvolvimento. Para usar PostgreSQL/Aiven, crie um ficheiro `.env` local a partir de `.env.example` e defina `DATABASE_URL` com a connection string da Aiven.
-
-Em Koyeb, adicione `DATABASE_URL` como variável de ambiente/secret com a connection string da Aiven. Não coloque o utilizador ou password diretamente no código.
+Por defeito, o projeto usa SQLite em desenvolvimento. Para usar PostgreSQL/Aiven, crie um ficheiro `.env` local a partir de `.env.example` e defina `DATABASE_URL` com a connection string da base de dados.
 
 ```sh
 python manage.py makemigrations

@@ -9,7 +9,7 @@
                     <img 
                     style="height:350px; width:350px;"
                     class="img-thumbnail"
-                    src="{{ animal.fotos.first.imagem.url }}"
+                    src="{{ animal.fotos.first.url }}"
                     alt="Your Logo">
                 </div>
                 {% for foto in animal.fotos.all %}
@@ -19,7 +19,7 @@
                             <img 
                             style="height:350px; width:350px;"
                             class="img-thumbnail"
-                            src="{{foto.imagem.url}}"
+                            src="{{foto.url}}"
                             alt="Your Logo">
                         </div>
                     {% endif %}
@@ -39,7 +39,6 @@
     {% else %}
     {% endif %}
     <form
-    hx-encoding="multipart/form-data"
     hx-post="{% url 'save_animal_image' animal.id%}"
     hx-target="#animal_fotos_div" 
     hx-swap="innerHTML"
