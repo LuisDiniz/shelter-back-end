@@ -37,12 +37,21 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4️⃣ Configurar a Base de Dados
+### 4️⃣ Configurações
+
+#### Cloudinary
+
+Para permitir upload de imagens de animais para Cloudinary, configure as seguintes variáveis de ambiente:
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
+- `CLOUDINARY_ANIMAL_FOLDER` (opcional)
+- `CLOUDINARY_MAX_IMAGE_BYTES` (opcional)
+
+#### Base de Dados
 Por defeito, o projeto usa SQLite em desenvolvimento. Para usar PostgreSQL/Aiven, crie um ficheiro `.env` local a partir de `.env.example` e defina `DATABASE_URL` com a connection string da base de dados.
 
-Para permitir upload de imagens de animais para Cloudinary, configure também `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` e `CLOUDINARY_API_SECRET`. Opcionalmente, ajuste `CLOUDINARY_ANIMAL_FOLDER` e `CLOUDINARY_MAX_IMAGE_BYTES`.
-
-A API guarda o URL final devolvido pela Cloudinary na tabela de imagens do animal e expõe o primeiro URL como `image_url` por compatibilidade.
+Para instalar as migrações da base da dados, execute:
 
 ```sh
 python manage.py makemigrations
