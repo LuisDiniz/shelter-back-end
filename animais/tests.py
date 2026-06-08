@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.client import BOUNDARY, MULTIPART_CONTENT, encode_multipart
 
 from .models import Animal, AnimalImages
@@ -240,6 +240,53 @@ class AnimalApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unsupported image type", response.json()["detail"])
+
+    def test_invalid_uploaded_image_type_logs_rejection_context(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        image = SimpleUploadedFile("notes.txt", b"hello", content_type="text/plain")
+
+        with self.assertLogs("general_logger", level="WARNING") as logs:
+            response = self.client.post(
+                "/api/animals/",
+                data={**self._animal_payload(), "image_file": image},
+                headers={"Authorization": f"Token {token}"},
+            )
+
+        log_output = "\n".join(logs.output)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported image type", log_output)
+        self.assertIn("image_content_type", log_output)
+        self.assertIn("notes.txt", log_output)
+        self.assertIn("text/plain", log_output)
+
+    @override_settings(
+        CLOUDINARY_CLOUD_NAME="",
+        CLOUDINARY_API_KEY="",
+        CLOUDINARY_API_SECRET="",
+    )
+    def test_missing_cloudinary_config_logs_bad_request_context(self):
+        token = self._get_token("admin@example.com", "admin-pass")
+        image = SimpleUploadedFile(
+            "max.jpg",
+            b"image-bytes",
+            content_type="image/jpeg",
+        )
+
+        with self.assertLogs("general_logger", level="WARNING") as logs:
+            response = self.client.post(
+                "/api/animals/",
+                data={**self._animal_payload(), "image_file": image},
+                headers={"Authorization": f"Token {token}"},
+            )
+
+        log_output = "\n".join(logs.output)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "Cloudinary is not configured.")
+        self.assertIn("Cloudinary is not configured", log_output)
+        self.assertIn("CLOUDINARY_CLOUD_NAME", log_output)
+        self.assertIn("max.jpg", log_output)
 
     def test_heic_uploaded_image_is_allowed(self):
         image = SimpleUploadedFile("photo.HEIC", b"image-bytes", content_type="image/heic")

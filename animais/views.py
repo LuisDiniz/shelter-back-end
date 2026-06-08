@@ -18,6 +18,9 @@ from .forms import AnimalForm, AnimalFotosForm
 
 logger = logging.getLogger("general_logger")
 
+SENSITIVE_LOG_FIELD_PARTS = ("authorization", "password", "secret", "token", "api_key")
+MAX_LOG_VALUE_LENGTH = 200
+
 SUPPORTED_IMAGE_CONTENT_TYPES = {
     "image/jpeg",
     "image/png",
@@ -30,7 +33,105 @@ SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"
 
 
 class CloudinaryUploadError(Exception):
-    pass
+    def __init__(self, message, log_context=None):
+        super().__init__(message)
+        self.log_context = log_context or {}
+
+
+def truncate_log_value(value):
+    text = str(value)
+    if len(text) <= MAX_LOG_VALUE_LENGTH:
+        return text
+
+    return f"{text[:MAX_LOG_VALUE_LENGTH]}..."
+
+
+def is_sensitive_log_field(field_name):
+    field_name = field_name.lower()
+    return any(part in field_name for part in SENSITIVE_LOG_FIELD_PARTS)
+
+
+def sanitize_log_payload(payload):
+    if payload is None:
+        return None
+
+    sanitized_payload = {}
+    for key, value in payload.items():
+        if is_sensitive_log_field(key):
+            sanitized_payload[key] = "[redacted]"
+        elif isinstance(value, (list, tuple)):
+            sanitized_payload[key] = [truncate_log_value(item) for item in value]
+        elif isinstance(value, dict):
+            sanitized_payload[key] = sanitize_log_payload(value)
+        else:
+            sanitized_payload[key] = truncate_log_value(value)
+
+    return sanitized_payload
+
+
+def summarize_uploaded_file(image_file):
+    if not image_file:
+        return None
+
+    return {
+        "name": Path(getattr(image_file, "name", "") or "").name,
+        "content_type": getattr(image_file, "content_type", "") or "",
+        "size": getattr(image_file, "size", None),
+    }
+
+
+def get_request_log_context(request, payload=None, image_file=None, extra=None):
+    context = {
+        "method": request.method,
+        "path": request.get_full_path(),
+        "content_type": request.content_type or "",
+        "content_length": request.META.get("CONTENT_LENGTH", ""),
+        "origin": request.headers.get("Origin", ""),
+        "referer": request.headers.get("Referer", ""),
+        "user_agent": request.headers.get("User-Agent", ""),
+        "remote_addr": request.META.get("REMOTE_ADDR", ""),
+        "has_authorization": bool(request.headers.get("Authorization")),
+        "payload": sanitize_log_payload(payload),
+        "image_file": summarize_uploaded_file(image_file),
+    }
+
+    if extra:
+        context.update(extra)
+
+    return context
+
+
+def log_animal_api_request(request, payload=None, image_file=None, extra=None):
+    logger.info(
+        "Animal API request received: %s",
+        json.dumps(get_request_log_context(request, payload, image_file, extra)),
+    )
+
+
+def log_animal_api_rejection(request, reason, payload=None, image_file=None, status=400, extra=None):
+    context = get_request_log_context(
+        request,
+        payload,
+        image_file,
+        {
+            "status": status,
+            "reason": reason,
+            **(extra or {}),
+        },
+    )
+    logger.warning("Animal API request rejected: %s", json.dumps(context))
+
+
+def animal_api_error_response(request, detail, status=400, payload=None, image_file=None, extra=None):
+    log_animal_api_rejection(
+        request,
+        detail,
+        payload=payload,
+        image_file=image_file,
+        status=status,
+        extra=extra,
+    )
+    return JsonResponse({"detail": detail}, status=status)
 
 
 class AnimalList(LoginRequiredMixin, TemplateView):
@@ -93,7 +194,12 @@ def parse_multipart_request(request):
             request.encoding,
         )
         return parser.parse()
-    except MultiPartParserError:
+    except MultiPartParserError as error:
+        log_animal_api_rejection(
+            request,
+            "Invalid multipart body.",
+            extra={"parser_error": truncate_log_value(error)},
+        )
         return None, None
 
 
@@ -118,10 +224,19 @@ def validate_animal_image_file(image_file):
         raise CloudinaryUploadError("Image file is required.")
 
     if image_file.size == 0:
-        raise CloudinaryUploadError("Image file is empty.")
+        raise CloudinaryUploadError(
+            "Image file is empty.",
+            {"image_size": image_file.size},
+        )
 
     if image_file.size > settings.CLOUDINARY_MAX_IMAGE_BYTES:
-        raise CloudinaryUploadError("Image file is too large.")
+        raise CloudinaryUploadError(
+            "Image file is too large.",
+            {
+                "image_size": image_file.size,
+                "max_image_bytes": settings.CLOUDINARY_MAX_IMAGE_BYTES,
+            },
+        )
 
     content_type = (getattr(image_file, "content_type", "") or "").lower()
     extension = Path(image_file.name or "").suffix.lower()
@@ -131,29 +246,50 @@ def validate_animal_image_file(image_file):
     has_generic_content_type = content_type in GENERIC_IMAGE_CONTENT_TYPES
 
     if content_type and not has_supported_content_type and not has_generic_content_type:
-        raise CloudinaryUploadError("Unsupported image type.")
+        raise CloudinaryUploadError(
+            "Unsupported image type.",
+            {"image_content_type": content_type, "image_extension": extension},
+        )
 
     if extension and not has_supported_extension:
-        raise CloudinaryUploadError("Unsupported image type.")
+        raise CloudinaryUploadError(
+            "Unsupported image type.",
+            {"image_content_type": content_type, "image_extension": extension},
+        )
 
     if not has_supported_content_type and not has_supported_extension:
-        raise CloudinaryUploadError("Unsupported image type.")
+        raise CloudinaryUploadError(
+            "Unsupported image type.",
+            {"image_content_type": content_type, "image_extension": extension},
+        )
 
 
 def upload_animal_image_to_cloudinary(image_file):
     validate_animal_image_file(image_file)
 
-    if not all([
-        settings.CLOUDINARY_CLOUD_NAME,
-        settings.CLOUDINARY_API_KEY,
-        settings.CLOUDINARY_API_SECRET,
-    ]):
-        raise CloudinaryUploadError("Cloudinary is not configured.")
+    cloudinary_settings = {
+        "CLOUDINARY_CLOUD_NAME": settings.CLOUDINARY_CLOUD_NAME,
+        "CLOUDINARY_API_KEY": settings.CLOUDINARY_API_KEY,
+        "CLOUDINARY_API_SECRET": settings.CLOUDINARY_API_SECRET,
+    }
+    missing_settings = [
+        setting_name
+        for setting_name, setting_value in cloudinary_settings.items()
+        if not setting_value
+    ]
+    if missing_settings:
+        raise CloudinaryUploadError(
+            "Cloudinary is not configured.",
+            {"missing_settings": missing_settings},
+        )
 
     try:
         import cloudinary.uploader as cloudinary_uploader
     except ImportError as error:
-        raise CloudinaryUploadError("Cloudinary SDK is not installed.") from error
+        raise CloudinaryUploadError(
+            "Cloudinary SDK is not installed.",
+            {"missing_dependency": "cloudinary"},
+        ) from error
 
     try:
         upload_result = cloudinary_uploader.upload(
@@ -166,7 +302,10 @@ def upload_animal_image_to_cloudinary(image_file):
         )
     except Exception as error:
         logger.exception("Cloudinary animal image upload failed")
-        raise CloudinaryUploadError("Image upload failed.") from error
+        raise CloudinaryUploadError(
+            "Image upload failed.",
+            {"error_type": type(error).__name__},
+        ) from error
 
     secure_url = upload_result.get("secure_url")
     if not secure_url:
@@ -285,11 +424,17 @@ def animal_list_api(request):
         return JsonResponse([serialize_animal(animal, request) for animal in animals], safe=False)
 
     if not require_admin_user(request):
-        return JsonResponse({"detail": "Authentication credentials were not provided."}, status=403)
+        return animal_api_error_response(
+            request,
+            "Authentication credentials were not provided.",
+            status=403,
+        )
 
     payload, image_file, error = read_animal_request_payload(request)
     if error:
-        return JsonResponse({"detail": error}, status=400)
+        return animal_api_error_response(request, error, status=400)
+
+    log_animal_api_request(request, payload, image_file)
 
     try:
         if image_file:
@@ -299,7 +444,14 @@ def animal_list_api(request):
         animal.save()
         add_image_urls_to_animal(animal, payload)
     except CloudinaryUploadError as error:
-        return JsonResponse({"detail": str(error)}, status=400)
+        return animal_api_error_response(
+            request,
+            str(error),
+            status=400,
+            payload=payload,
+            image_file=image_file,
+            extra=error.log_context,
+        )
 
     return JsonResponse(serialize_animal(animal, request), status=201)
 
@@ -316,7 +468,12 @@ def animal_detail_api(request, animal_id):
         return JsonResponse(serialize_animal(animal, request))
 
     if not require_admin_user(request):
-        return JsonResponse({"detail": "Authentication credentials were not provided."}, status=403)
+        return animal_api_error_response(
+            request,
+            "Authentication credentials were not provided.",
+            status=403,
+            extra={"animal_id": animal_id},
+        )
 
     if request.method == "DELETE":
         animal.delete()
@@ -324,7 +481,14 @@ def animal_detail_api(request, animal_id):
 
     payload, image_file, error = read_animal_request_payload(request)
     if error:
-        return JsonResponse({"detail": error}, status=400)
+        return animal_api_error_response(
+            request,
+            error,
+            status=400,
+            extra={"animal_id": animal_id},
+        )
+
+    log_animal_api_request(request, payload, image_file, extra={"animal_id": animal_id})
 
     try:
         if image_file:
@@ -334,7 +498,14 @@ def animal_detail_api(request, animal_id):
         animal.save()
         add_image_urls_to_animal(animal, payload)
     except CloudinaryUploadError as error:
-        return JsonResponse({"detail": str(error)}, status=400)
+        return animal_api_error_response(
+            request,
+            str(error),
+            status=400,
+            payload=payload,
+            image_file=image_file,
+            extra={"animal_id": animal_id, **error.log_context},
+        )
 
     return JsonResponse(serialize_animal(animal, request))
 
