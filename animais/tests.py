@@ -42,7 +42,7 @@ class AnimalApiTests(TestCase):
         )
 
     def test_public_can_list_animals(self):
-        response = self.client.get("/api/animals/")
+        response = self.client.get("/api/animals")
         animals = response.json()
         maia = next(animal for animal in animals if animal["name"] == "Maia")
 
@@ -52,26 +52,25 @@ class AnimalApiTests(TestCase):
         self.assertIn("image_url", maia)
         self.assertIn(self.animal_image.image_url, maia["image_urls"])
 
-    def test_public_can_list_animals_without_trailing_slash(self):
-        response = self.client.get("/api/animals")
-        animals = response.json()
-        maia = next(animal for animal in animals if animal["name"] == "Maia")
+    def test_animals_api_does_not_register_trailing_slash_urls(self):
+        list_response = self.client.get("/api/animals/")
+        detail_response = self.client.get(f"/api/animals/{self.animal.id}/")
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(maia["id"], self.animal.id)
+        self.assertEqual(list_response.status_code, 404)
+        self.assertEqual(detail_response.status_code, 404)
 
     def test_animal_list_api_uses_cache_after_first_request(self):
-        first_response = self.client.get("/api/animals/")
+        first_response = self.client.get("/api/animals")
 
         with self.assertNumQueries(0):
-            cached_response = self.client.get("/api/animals/")
+            cached_response = self.client.get("/api/animals")
 
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(cached_response.status_code, 200)
         self.assertEqual(cached_response.json(), first_response.json())
 
     def test_public_can_retrieve_animal(self):
-        response = self.client.get(f"/api/animals/{self.animal.id}/")
+        response = self.client.get(f"/api/animals/{self.animal.id}")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["id"], self.animal.id)
@@ -79,10 +78,10 @@ class AnimalApiTests(TestCase):
         self.assertEqual(response.json()["images"][0]["image_url"], self.animal_image.image_url)
 
     def test_animal_detail_api_uses_cache_after_first_request(self):
-        first_response = self.client.get(f"/api/animals/{self.animal.id}/")
+        first_response = self.client.get(f"/api/animals/{self.animal.id}")
 
         with self.assertNumQueries(0):
-            cached_response = self.client.get(f"/api/animals/{self.animal.id}/")
+            cached_response = self.client.get(f"/api/animals/{self.animal.id}")
 
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(cached_response.status_code, 200)
@@ -90,15 +89,15 @@ class AnimalApiTests(TestCase):
 
     def test_animal_create_invalidates_list_cache(self):
         token = self._get_token("admin@example.com", "admin-pass")
-        self.client.get("/api/animals/")
+        self.client.get("/api/animals")
 
         create_response = self.client.post(
-            "/api/animals/",
+            "/api/animals",
             data=json.dumps(self._animal_payload()),
             content_type="application/json",
             headers={"Authorization": f"Token {token}"},
         )
-        list_response = self.client.get("/api/animals/")
+        list_response = self.client.get("/api/animals")
         animal_names = [animal["name"] for animal in list_response.json()]
 
         self.assertEqual(create_response.status_code, 201)
@@ -106,17 +105,17 @@ class AnimalApiTests(TestCase):
 
     def test_animal_update_and_delete_invalidate_cached_api_responses(self):
         token = self._get_token("admin@example.com", "admin-pass")
-        self.client.get("/api/animals/")
-        self.client.get(f"/api/animals/{self.animal.id}/")
+        self.client.get("/api/animals")
+        self.client.get(f"/api/animals/{self.animal.id}")
 
         update_response = self.client.patch(
-            f"/api/animals/{self.animal.id}/",
+            f"/api/animals/{self.animal.id}",
             data=json.dumps({"name": "Maia Updated"}),
             content_type="application/json",
             headers={"Authorization": f"Token {token}"},
         )
-        list_response = self.client.get("/api/animals/")
-        detail_response = self.client.get(f"/api/animals/{self.animal.id}/")
+        list_response = self.client.get("/api/animals")
+        detail_response = self.client.get(f"/api/animals/{self.animal.id}")
 
         self.assertEqual(update_response.status_code, 200)
         self.assertIn(
@@ -126,11 +125,11 @@ class AnimalApiTests(TestCase):
         self.assertEqual(detail_response.json()["name"], "Maia Updated")
 
         delete_response = self.client.delete(
-            f"/api/animals/{self.animal.id}/",
+            f"/api/animals/{self.animal.id}",
             headers={"Authorization": f"Token {token}"},
         )
-        list_after_delete_response = self.client.get("/api/animals/")
-        detail_after_delete_response = self.client.get(f"/api/animals/{self.animal.id}/")
+        list_after_delete_response = self.client.get("/api/animals")
+        detail_after_delete_response = self.client.get(f"/api/animals/{self.animal.id}")
 
         self.assertEqual(delete_response.status_code, 204)
         self.assertNotIn(
@@ -141,7 +140,7 @@ class AnimalApiTests(TestCase):
 
     def test_anonymous_user_cannot_create_animal(self):
         response = self.client.post(
-            "/api/animals/",
+            "/api/animals",
             data=json.dumps(self._animal_payload()),
             content_type="application/json",
         )
@@ -152,7 +151,7 @@ class AnimalApiTests(TestCase):
         token = self._get_token("user@example.com", "user-pass")
 
         response = self.client.post(
-            "/api/animals/",
+            "/api/animals",
             data=json.dumps(self._animal_payload()),
             content_type="application/json",
             headers={"Authorization": f"Token {token}"},
@@ -164,7 +163,7 @@ class AnimalApiTests(TestCase):
         token = self._get_token("admin@example.com", "admin-pass")
 
         create_response = self.client.post(
-            "/api/animals/",
+            "/api/animals",
             data=json.dumps(self._animal_payload()),
             content_type="application/json",
             headers={"Authorization": f"Token {token}"},
@@ -181,7 +180,7 @@ class AnimalApiTests(TestCase):
             ).exists()
         )
         update_response = self.client.patch(
-            f"/api/animals/{animal_id}/",
+            f"/api/animals/{animal_id}",
             data=json.dumps({
                 "name": "Max Updated",
                 "image_url": "https://res.cloudinary.com/demo/image/upload/max-2.jpg",
@@ -197,7 +196,7 @@ class AnimalApiTests(TestCase):
         )
 
         delete_response = self.client.delete(
-            f"/api/animals/{animal_id}/",
+            f"/api/animals/{animal_id}",
             headers={"Authorization": f"Token {token}"},
         )
         self.assertEqual(delete_response.status_code, 204)
@@ -218,7 +217,7 @@ class AnimalApiTests(TestCase):
             return_value=cloudinary_url,
         ) as upload_mock:
             response = self.client.post(
-                "/api/animals/",
+                "/api/animals",
                 data={**payload, "image_file": image},
                 headers={"Authorization": f"Token {token}"},
             )
@@ -247,7 +246,7 @@ class AnimalApiTests(TestCase):
             return_value=cloudinary_url,
         ):
             response = self.client.post(
-                "/api/animals/",
+                "/api/animals",
                 data={**self._animal_payload(), "image_file": image},
                 headers={"Authorization": f"Token {token}"},
             )
@@ -277,7 +276,7 @@ class AnimalApiTests(TestCase):
         ) as upload_mock:
             response = self.client.generic(
                 "PATCH",
-                f"/api/animals/{self.animal.id}/",
+                f"/api/animals/{self.animal.id}",
                 data=encode_multipart(BOUNDARY, {"image_file": image}),
                 content_type=MULTIPART_CONTENT,
                 headers={"Authorization": f"Token {token}"},
@@ -302,7 +301,7 @@ class AnimalApiTests(TestCase):
         )
 
         response = self.client.post(
-            "/api/animals/",
+            "/api/animals",
             data={**self._animal_payload(), "image_file": image},
             headers={"Authorization": f"Token {token}"},
         )
@@ -314,7 +313,7 @@ class AnimalApiTests(TestCase):
         image = SimpleUploadedFile("notes.txt", b"hello", content_type="text/plain")
 
         response = self.client.post(
-            "/api/animals/",
+            "/api/animals",
             data={**self._animal_payload(), "image_file": image},
             headers={"Authorization": f"Token {token}"},
         )
@@ -328,7 +327,7 @@ class AnimalApiTests(TestCase):
 
         with self.assertLogs("general_logger", level="WARNING") as logs:
             response = self.client.post(
-                "/api/animals/",
+                "/api/animals",
                 data={**self._animal_payload(), "image_file": image},
                 headers={"Authorization": f"Token {token}"},
             )
@@ -356,7 +355,7 @@ class AnimalApiTests(TestCase):
 
         with self.assertLogs("general_logger", level="WARNING") as logs:
             response = self.client.post(
-                "/api/animals/",
+                "/api/animals",
                 data={**self._animal_payload(), "image_file": image},
                 headers={"Authorization": f"Token {token}"},
             )
