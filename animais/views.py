@@ -1,9 +1,12 @@
 import json
 import logging
 from pathlib import Path
+from pathlib import PurePosixPath
+from urllib.parse import unquote, urlparse
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import transaction
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import HttpResponse, JsonResponse
@@ -21,8 +24,8 @@ logger = logging.getLogger("general_logger")
 
 SENSITIVE_LOG_FIELD_PARTS = ("authorization", "password", "secret", "token", "api_key")
 MAX_LOG_VALUE_LENGTH = 200
-ANIMAL_API_LIST_CACHE_KEY = "animal_api:animals:list:v1"
-ANIMAL_API_DETAIL_CACHE_KEY_PREFIX = "animal_api:animals:detail:v1"
+ANIMAL_API_LIST_CACHE_KEY = "animal_api:animals:list:v2"
+ANIMAL_API_DETAIL_CACHE_KEY_PREFIX = "animal_api:animals:detail:v2"
 
 SUPPORTED_IMAGE_CONTENT_TYPES = {
     "image/jpeg",
@@ -33,7 +36,6 @@ SUPPORTED_IMAGE_CONTENT_TYPES = {
 }
 GENERIC_IMAGE_CONTENT_TYPES = {"", "application/octet-stream"}
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
-
 
 def get_animal_detail_cache_key(animal_id):
     return f"{ANIMAL_API_DETAIL_CACHE_KEY_PREFIX}:{animal_id}"
@@ -83,7 +85,7 @@ def sanitize_log_payload(payload):
     return sanitized_payload
 
 
-def summarize_uploaded_file(image_file):
+def summarize_single_uploaded_file(image_file):
     if not image_file:
         return None
 
@@ -92,6 +94,16 @@ def summarize_uploaded_file(image_file):
         "content_type": getattr(image_file, "content_type", "") or "",
         "size": getattr(image_file, "size", None),
     }
+
+
+def summarize_uploaded_file(image_file):
+    if hasattr(image_file, "items"):
+        return {
+            key: summarize_single_uploaded_file(file)
+            for key, file in image_file.items()
+        }
+
+    return summarize_single_uploaded_file(image_file)
 
 
 def get_request_log_context(request, payload=None, image_file=None, extra=None):
@@ -224,13 +236,13 @@ def read_animal_request_payload(request):
         if post_data is None or files is None:
             return None, None, "Invalid multipart body."
 
-        return post_data.dict(), files.get("image_file"), None
+        return post_data.dict(), files, None
 
     payload = read_json_body(request)
     if payload is None:
         return None, None, "Invalid JSON body."
 
-    return payload, None, None
+    return payload, {}, None
 
 
 def validate_animal_image_file(image_file):
@@ -276,6 +288,39 @@ def validate_animal_image_file(image_file):
             "Unsupported image type.",
             {"image_content_type": content_type, "image_extension": extension},
         )
+
+
+def strip_image_extension(asset_name):
+    path = PurePosixPath(asset_name)
+
+    if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
+        return asset_name[: -len(path.suffix)]
+
+    return asset_name
+
+
+def cloudinary_public_id_from_url(image_url):
+    parsed_url = urlparse(image_url)
+    path_parts = parsed_url.path.split("/")
+
+    try:
+        upload_index = path_parts.index("upload")
+    except ValueError:
+        asset_name = strip_image_extension(PurePosixPath(parsed_url.path).name)
+        return f"{settings.CLOUDINARY_ANIMAL_FOLDER}/{unquote(asset_name)}"
+
+    after_upload_parts = path_parts[upload_index + 1 :]
+    if not after_upload_parts:
+        return ""
+
+    folder = settings.CLOUDINARY_ANIMAL_FOLDER
+    try:
+        folder_index = after_upload_parts.index(folder)
+        asset_name = after_upload_parts[folder_index + 1]
+    except (ValueError, IndexError):
+        asset_name = after_upload_parts[-1]
+
+    return f"{folder}/{unquote(strip_image_extension(asset_name))}"
 
 
 def upload_animal_image_to_cloudinary(image_file):
@@ -325,19 +370,71 @@ def upload_animal_image_to_cloudinary(image_file):
     if not secure_url:
         raise CloudinaryUploadError("Cloudinary did not return an image URL.")
 
-    return secure_url
+    public_id = upload_result.get("public_id")
+    if not public_id:
+        raise CloudinaryUploadError("Cloudinary did not return a public ID.")
+
+    return {
+        "url": secure_url,
+        "public_id": public_id,
+    }
+
+
+def delete_animal_image_from_cloudinary(public_id):
+    cloudinary_settings = {
+        "CLOUDINARY_CLOUD_NAME": settings.CLOUDINARY_CLOUD_NAME,
+        "CLOUDINARY_API_KEY": settings.CLOUDINARY_API_KEY,
+        "CLOUDINARY_API_SECRET": settings.CLOUDINARY_API_SECRET,
+    }
+    missing_settings = [
+        setting_name
+        for setting_name, setting_value in cloudinary_settings.items()
+        if not setting_value
+    ]
+    if missing_settings:
+        raise CloudinaryUploadError(
+            "Cloudinary is not configured.",
+            {"missing_settings": missing_settings},
+        )
+
+    try:
+        import cloudinary.uploader as cloudinary_uploader
+    except ImportError as error:
+        raise CloudinaryUploadError(
+            "Cloudinary SDK is not installed.",
+            {"missing_dependency": "cloudinary"},
+        ) from error
+
+    try:
+        delete_result = cloudinary_uploader.destroy(
+            public_id,
+            resource_type="image",
+            invalidate=True,
+            cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+            api_key=settings.CLOUDINARY_API_KEY,
+            api_secret=settings.CLOUDINARY_API_SECRET,
+        )
+    except Exception as error:
+        logger.exception("Cloudinary animal image delete failed")
+        raise CloudinaryUploadError(
+            "Image delete failed.",
+            {"error_type": type(error).__name__, "public_id": public_id},
+        ) from error
+
+    result = delete_result.get("result")
+    if result not in {"ok", "not found"}:
+        raise CloudinaryUploadError(
+            "Image delete failed.",
+            {"public_id": public_id, "cloudinary_result": result},
+        )
 
 
 def serialize_animal(animal, request=None):
     images = [
-        serialized_image
-        for serialized_image in (
-            serialize_animal_image(image, request)
-            for image in animal.fotos.all().order_by("id")
-        )
-        if serialized_image["image_url"]
+        image.get_url(request)
+        for image in animal.fotos.all().order_by("-is_cover", "id")
+        if image.get_url(request)
     ]
-    image_urls = [image["image_url"] for image in images]
 
     return {
         "id": animal.id,
@@ -347,19 +444,11 @@ def serialize_animal(animal, request=None):
         "age": animal.idade,
         "gender": animal.gender,
         "description": animal.descricao,
-        "image_url": image_urls[0] if image_urls else "",
-        "image_urls": image_urls,
         "images": images,
+        "cover_image_url": images[0] if images else "",
         "medical_history": animal.medical_history,
         "vaccinations": animal.vaccinations,
         "admission_date": animal.admission_date or animal.last_update_date,
-    }
-
-
-def serialize_animal_image(image, request=None):
-    return {
-        "id": image.id,
-        "image_url": image.get_url(request),
     }
 
 
@@ -391,40 +480,159 @@ def apply_animal_payload(animal, payload):
 
     return animal
 
+def get_images_manifest_from_payload(payload):
+    if "images" not in payload:
+        return None, None
 
-def get_image_urls_from_payload(payload):
-    raw_urls = []
+    manifest = payload.get("images")
 
-    if "image_url" in payload:
-        raw_urls.append(payload.get("image_url"))
+    if isinstance(manifest, str):
+        try:
+            manifest = json.loads(manifest)
+        except json.JSONDecodeError:
+            return None, "Images manifest must be valid JSON."
 
-    image_urls = payload.get("image_urls")
-    if isinstance(image_urls, list):
-        raw_urls.extend(image_urls)
-    elif image_urls:
-        raw_urls.append(image_urls)
+    if not isinstance(manifest, list):
+        return None, "Images manifest must be a list."
 
-    images = payload.get("images")
-    if isinstance(images, list):
-        for image in images:
-            if isinstance(image, dict):
-                raw_urls.append(image.get("image_url") or image.get("url"))
-            else:
-                raw_urls.append(image)
-
-    return [
-        image_url.strip()
-        for image_url in raw_urls
-        if isinstance(image_url, str) and image_url.strip()
-    ]
+    return manifest, None
 
 
-def add_image_urls_to_animal(animal, payload):
-    for image_url in get_image_urls_from_payload(payload):
-        AnimalImages.objects.get_or_create(
-            animal=animal,
-            image_url=image_url,
+def parse_manifest_cover(value):
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        return value.lower() == "true"
+
+    return False
+
+
+def parse_animal_image_manifest(payload, files=None, animal=None):
+    manifest, manifest_error = get_images_manifest_from_payload(payload)
+    if manifest_error:
+        return None, manifest_error
+
+    if manifest is None:
+        return None, None
+
+    existing_images_by_url = {}
+    if animal:
+        existing_images_by_url = {
+            image.image_url: image
+            for image in animal.fotos.all()
+            if image.image_url
+        }
+
+    parsed_manifest = []
+    cover_count = 0
+
+    for index, manifest_entry in enumerate(manifest):
+        if not isinstance(manifest_entry, dict):
+            return None, "Each image manifest entry must be an object."
+
+        is_cover = parse_manifest_cover(manifest_entry.get("is_cover", False))
+        cover_count += int(is_cover)
+
+        image_url = manifest_entry.get("url")
+        file_key = manifest_entry.get("file_key")
+        has_url = isinstance(image_url, str) and bool(image_url.strip())
+        has_file_key = isinstance(file_key, str) and bool(file_key.strip())
+
+        if has_url == has_file_key:
+            return None, "Each image manifest entry must include either url or file_key."
+
+        if has_url:
+            image_url = image_url.strip()
+            existing_image = existing_images_by_url.get(image_url)
+            if not existing_image or not existing_image.cloudinary_public_id:
+                return None, "Existing image URL does not match a stored image."
+
+            parsed_manifest.append(
+                {
+                    "type": "existing",
+                    "image": existing_image,
+                    "is_cover": is_cover,
+                }
+            )
+            continue
+
+        image_file = files.get(file_key.strip()) if files else None
+        if not image_file:
+            return None, f"Image file '{file_key}' is required."
+
+        parsed_manifest.append(
+            {
+                "type": "upload",
+                "file": image_file,
+                "is_cover": is_cover,
+                "index": index,
+            }
         )
+
+    if parsed_manifest and cover_count != 1:
+        return None, "Images manifest must include exactly one cover image."
+
+    return parsed_manifest, None
+
+
+def apply_animal_image_manifest(animal, parsed_manifest):
+    if parsed_manifest is None:
+        return
+
+    existing_entries = [
+        manifest_entry
+        for manifest_entry in parsed_manifest
+        if manifest_entry["type"] == "existing"
+    ]
+    upload_entries = [
+        manifest_entry
+        for manifest_entry in parsed_manifest
+        if manifest_entry["type"] == "upload"
+    ]
+    kept_image_ids = {
+        manifest_entry["image"].id
+        for manifest_entry in existing_entries
+    }
+    omitted_images = [
+        image
+        for image in animal.fotos.all()
+        if image.id not in kept_image_ids
+    ]
+    uploaded_images = []
+
+    for manifest_entry in upload_entries:
+        upload_result = upload_animal_image_to_cloudinary(manifest_entry["file"])
+        uploaded_images.append(
+            {
+                "image_url": upload_result["url"],
+                "cloudinary_public_id": upload_result["public_id"],
+                "is_cover": manifest_entry["is_cover"],
+            }
+        )
+
+    for image in omitted_images:
+        delete_animal_image_from_cloudinary(image.cloudinary_public_id)
+
+    with transaction.atomic():
+        AnimalImages.objects.filter(animal=animal).update(is_cover=False)
+        if omitted_images:
+            AnimalImages.objects.filter(
+                id__in=[image.id for image in omitted_images]
+            ).delete()
+
+        for manifest_entry in existing_entries:
+            image = manifest_entry["image"]
+            image.is_cover = manifest_entry["is_cover"]
+            image.save(update_fields=["is_cover"])
+
+        for uploaded_image in uploaded_images:
+            AnimalImages.objects.create(
+                animal=animal,
+                image_url=uploaded_image["image_url"],
+                cloudinary_public_id=uploaded_image["cloudinary_public_id"],
+                is_cover=uploaded_image["is_cover"],
+            )
 
 
 @csrf_exempt
@@ -454,26 +662,37 @@ def animal_list_api(request):
             status=403,
         )
 
-    payload, image_file, error = read_animal_request_payload(request)
+    payload, image_files, error = read_animal_request_payload(request)
     if error:
         return animal_api_error_response(request, error, status=400)
 
-    log_animal_api_request(request, payload, image_file)
+    log_animal_api_request(request, payload, image_files)
+
+    parsed_image_manifest, manifest_error = parse_animal_image_manifest(
+        payload,
+        image_files,
+    )
+    if manifest_error:
+        return animal_api_error_response(
+            request,
+            manifest_error,
+            status=400,
+            payload=payload,
+            image_file=image_files,
+        )
 
     try:
-        if image_file:
-            payload["image_url"] = upload_animal_image_to_cloudinary(image_file)
-
-        animal = apply_animal_payload(Animal(), payload)
-        animal.save()
-        add_image_urls_to_animal(animal, payload)
+        with transaction.atomic():
+            animal = apply_animal_payload(Animal(), payload)
+            animal.save()
+            apply_animal_image_manifest(animal, parsed_image_manifest)
     except CloudinaryUploadError as error:
         return animal_api_error_response(
             request,
             str(error),
             status=400,
             payload=payload,
-            image_file=image_file,
+            image_file=image_files,
             extra=error.log_context,
         )
 
@@ -505,7 +724,10 @@ def animal_detail_api(request, animal_id):
         )
         return JsonResponse(serialized_animal)
 
-    animal = get_object_or_404(Animal, id=animal_id)
+    animal = get_object_or_404(
+        Animal.objects.prefetch_related("fotos"),
+        id=animal_id,
+    )
 
     if not require_admin_user(request):
         return animal_api_error_response(
@@ -520,7 +742,7 @@ def animal_detail_api(request, animal_id):
         invalidate_animal_api_cache(animal_id)
         return HttpResponse(status=204)
 
-    payload, image_file, error = read_animal_request_payload(request)
+    payload, image_files, error = read_animal_request_payload(request)
     if error:
         return animal_api_error_response(
             request,
@@ -529,22 +751,35 @@ def animal_detail_api(request, animal_id):
             extra={"animal_id": animal_id},
         )
 
-    log_animal_api_request(request, payload, image_file, extra={"animal_id": animal_id})
+    log_animal_api_request(request, payload, image_files, extra={"animal_id": animal_id})
+
+    parsed_image_manifest, manifest_error = parse_animal_image_manifest(
+        payload,
+        image_files,
+        animal=animal,
+    )
+    if manifest_error:
+        return animal_api_error_response(
+            request,
+            manifest_error,
+            status=400,
+            payload=payload,
+            image_file=image_files,
+            extra={"animal_id": animal_id},
+        )
 
     try:
-        if image_file:
-            payload["image_url"] = upload_animal_image_to_cloudinary(image_file)
-
-        apply_animal_payload(animal, payload)
-        animal.save()
-        add_image_urls_to_animal(animal, payload)
+        with transaction.atomic():
+            apply_animal_payload(animal, payload)
+            animal.save()
+            apply_animal_image_manifest(animal, parsed_image_manifest)
     except CloudinaryUploadError as error:
         return animal_api_error_response(
             request,
             str(error),
             status=400,
             payload=payload,
-            image_file=image_file,
+            image_file=image_files,
             extra={"animal_id": animal_id, **error.log_context},
         )
 
@@ -559,11 +794,16 @@ class AnimalImagens(LoginRequiredMixin, TemplateView):
         
         if form.is_valid():
             animal = get_object_or_404(Animal, id= animal_id)
+            is_first_image = not AnimalImages.objects.filter(animal=animal).exists()
+            image_url = form.cleaned_data['image_url']
             
             AnimalImages.objects.create(
                 animal = animal,
-                image_url = form.cleaned_data['image_url']
+                image_url = image_url,
+                cloudinary_public_id = cloudinary_public_id_from_url(image_url),
+                is_cover = is_first_image,
             )
+            invalidate_animal_api_cache(animal.id)
             form = AnimalFotosForm()
             
             context = {
