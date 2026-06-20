@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from adoptantes.models import Adoptante
 
 
@@ -53,6 +54,21 @@ class Animal(models.Model):
 class AnimalImages(models.Model):
     animal = models.ForeignKey(Animal, on_delete=models.CASCADE, null=True, related_name="fotos")
     image_url = models.URLField(max_length=500, blank=True, default="")
+    is_cover = models.BooleanField(default=False)
+    cloudinary_public_id = models.CharField(max_length=255, unique=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=~Q(cloudinary_public_id=""),
+                name="animal_image_public_id_required",
+            ),
+            models.UniqueConstraint(
+                fields=["animal"],
+                condition=Q(is_cover=True),
+                name="one_cover_image_per_animal",
+            ),
+        ]
 
     def get_url(self, request=None):
         if self.image_url:
